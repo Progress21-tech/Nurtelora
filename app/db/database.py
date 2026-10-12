@@ -1,83 +1,162 @@
-import sqlite3
+"""Synchronous SQLAlchemy connection boundary for application SQL.
+
+The services use positional ``?`` parameters. This small adapter converts them to
+SQLAlchemy named binds so values remain parameterized across SQLite and PostgreSQL.
+Schema changes are owned by Alembic; importing this module never creates tables.
+"""
 from contextlib import contextmanager
 from pathlib import Path
+import re
+from threading import Lock
+from typing import Any
+
+from sqlalchemy import create_engine, event, text
+from sqlalchemy.engine import Connection, Engine, make_url
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.pool import NullPool, StaticPool
+
 from app.config import get_settings
 
-SCHEMA = """
-PRAGMA foreign_keys=ON;
-CREATE TABLE IF NOT EXISTS users (
- id TEXT PRIMARY KEY, sender_hash TEXT UNIQUE NOT NULL, consent_status TEXT NOT NULL DEFAULT 'unknown',
- preferred_language TEXT, registration_state TEXT NOT NULL DEFAULT 'new', facility_id TEXT,
- reminder_opt_in INTEGER NOT NULL DEFAULT 0, stopped INTEGER NOT NULL DEFAULT 0,
- pending_appointment_at TEXT,
- created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
- deleted_at TEXT
-);
-CREATE TABLE IF NOT EXISTS consent_records (
- id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), consent_type TEXT NOT NULL,
- status TEXT NOT NULL, notice_version TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-CREATE TABLE IF NOT EXISTS facilities (
- id TEXT PRIMARY KEY, name TEXT NOT NULL, address TEXT NOT NULL, state TEXT, lga TEXT,
- latitude REAL, longitude REAL, phone TEXT, services TEXT NOT NULL DEFAULT '[]', opening_hours TEXT,
- source TEXT NOT NULL, last_verified_at TEXT, owner TEXT, verification_status TEXT NOT NULL DEFAULT 'unverified'
-);
-CREATE TABLE IF NOT EXISTS appointments (
- id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), facility_id TEXT REFERENCES facilities(id),
- scheduled_at TEXT, source TEXT NOT NULL, confirmation_status TEXT NOT NULL,
- owner TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-CREATE TABLE IF NOT EXISTS knowledge_entries (
- id TEXT PRIMARY KEY, topic TEXT NOT NULL, intent TEXT NOT NULL, language TEXT NOT NULL, approved_text TEXT NOT NULL,
- source_title TEXT NOT NULL, source_url TEXT NOT NULL, reviewed_at TEXT, reviewer_role TEXT,
- version TEXT NOT NULL, review_due_at TEXT, review_status TEXT NOT NULL DEFAULT 'pending'
-);
-CREATE TABLE IF NOT EXISTS processed_messages (
- message_id TEXT PRIMARY KEY, user_id TEXT REFERENCES users(id), message_type TEXT NOT NULL,
- processing_status TEXT NOT NULL, error_category TEXT, outbound_message_id TEXT,
- created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-CREATE TABLE IF NOT EXISTS interaction_events (
- id TEXT PRIMARY KEY, session_id TEXT NOT NULL, task_type TEXT NOT NULL, language TEXT,
- succeeded INTEGER NOT NULL, failure_category TEXT, latency_ms INTEGER,
- created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-);
-"""
 
-def _path() -> str:
-    url = get_settings().database_url
-    if not url.startswith("sqlite:///"):
-        raise RuntimeError("This prototype currently supports SQLite only")
-    return url.removeprefix("sqlite:///")
+class DatabaseUnavailable(RuntimeError):
+    """Raised when a configured database cannot be reached or used."""
+
+
+class DatabaseResult:
+    def __init__(self, result):
+        self._result = result
+
+    def fetchone(self):
+        return self._result.mappings().fetchone() if self._result.returns_rows else None
+
+    def fetchall(self):
+        return self._result.mappings().fetchall() if self._result.returns_rows else []
+
+    @property
+    def rowcount(self):
+        return self._result.rowcount
+
+
+class DatabaseConnection:
+    def __init__(self, connection: Connection):
+        self._connection = connection
+
+    def execute(self, statement: str, parameters: Any = ()) -> DatabaseResult:
+        if isinstance(parameters, dict):
+            bound = parameters
+            sql = statement
+        else:
+            values = tuple(parameters or ())
+            index = 0
+
+            def replace_placeholder(_match):
+                nonlocal index
+                name = f"p{index}"
+                index += 1
+                return f":{name}"
+
+            sql = re.sub(r"\?", replace_placeholder, statement)
+            if index != len(values):
+                raise ValueError("SQL parameter count does not match placeholders")
+            bound = {f"p{i}": value for i, value in enumerate(values)}
+        result = self._connection.execute(text(sql), bound)
+        return DatabaseResult(result)
+
+    @property
+    def dialect_name(self) -> str:
+        return self._connection.dialect.name
+
+
+def normalize_database_url(value: str) -> str:
+    """Normalize PostgreSQL URLs to psycopg 3 while preserving URL options."""
+    try:
+        url = make_url(value)
+    except Exception:
+        raise ValueError("DATABASE_URL is not a valid SQLAlchemy URL") from None
+    if url.drivername in {"postgres", "postgresql"}:
+        url = url.set(drivername="postgresql+psycopg")
+    return url.render_as_string(hide_password=False)
+
+
+def configured_database_url() -> str:
+    settings = get_settings()
+    raw = settings.database_url.strip()
+    if not raw:
+        raise RuntimeError("DATABASE_URL must be configured")
+    url = normalize_database_url(raw)
+    if settings.app_env.casefold() == "production" and not url.startswith("postgresql+psycopg://"):
+        raise RuntimeError("Production requires DATABASE_URL to point to PostgreSQL.")
+    if not (url.startswith("postgresql+psycopg://") or url.startswith("sqlite:")):
+        raise RuntimeError("DATABASE_URL must use PostgreSQL or explicitly configured SQLite.")
+    return url
+
+
+_ENGINES: dict[str, Engine] = {}
+_ENGINE_LOCK = Lock()
+
+
+def _engine_for_url(url: str) -> Engine:
+    with _ENGINE_LOCK:
+        if url in _ENGINES:
+            return _ENGINES[url]
+        engine = _create_engine(url)
+        _ENGINES[url] = engine
+        return engine
+
+
+def _create_engine(url: str) -> Engine:
+    parsed = make_url(url)
+    if parsed.drivername.startswith("sqlite"):
+        database = parsed.database or ""
+        if database not in {"", ":memory:"}:
+            Path(database).parent.mkdir(parents=True, exist_ok=True)
+        if database in {"", ":memory:"}:
+            engine = create_engine(url, poolclass=StaticPool, connect_args={"check_same_thread": False, "timeout": 10})
+        else:
+            engine = create_engine(url, poolclass=NullPool, connect_args={"check_same_thread": False, "timeout": 10})
+
+        @event.listens_for(engine, "connect")
+        def _enable_sqlite_foreign_keys(dbapi_connection, _connection_record):
+            cursor = dbapi_connection.cursor()
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.close()
+
+        return engine
+    return create_engine(
+        url,
+        pool_size=5,
+        max_overflow=2,
+        pool_timeout=20,
+        pool_recycle=1800,
+        pool_pre_ping=True,
+        hide_parameters=True,
+        connect_args={"connect_timeout": 10},
+    )
+
+
+def get_engine() -> Engine:
+    return _engine_for_url(configured_database_url())
+
 
 @contextmanager
 def connection():
-    path = _path()
-    if path != ":memory:":
-        Path(path).parent.mkdir(parents=True, exist_ok=True) if Path(path).parent != Path('.') else None
-    conn = sqlite3.connect(path, timeout=10)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys=ON")
+    """Yield a transaction-scoped connection and roll back on every exception."""
+    engine = get_engine()
+    with engine.begin() as conn:
+        yield DatabaseConnection(conn)
+
+
+def check_database() -> None:
     try:
-        yield conn
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.close()
+        with connection() as conn:
+            conn.execute("SELECT 1 FROM users LIMIT 0")
+    except SQLAlchemyError:
+        raise DatabaseUnavailable("Configured database is unavailable or the operation failed.") from None
 
-def init_db() -> None:
-    with connection() as conn:
-        conn.executescript(SCHEMA)
-        # Lightweight additive migrations keep existing local prototype databases usable.
-        columns={row[1] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
-        if "pending_appointment_at" not in columns:
-            conn.execute("ALTER TABLE users ADD COLUMN pending_appointment_at TEXT")
-        knowledge_columns={row[1] for row in conn.execute("PRAGMA table_info(knowledge_entries)").fetchall()}
-        if "review_due_at" not in knowledge_columns:
-            conn.execute("ALTER TABLE knowledge_entries ADD COLUMN review_due_at TEXT")
 
-if __name__ == "__main__":
-    init_db()
-    print("Database initialized")
+def dispose_engines() -> None:
+    """Test helper to close cached pools between isolated test databases."""
+    with _ENGINE_LOCK:
+        for engine in _ENGINES.values():
+            engine.dispose()
+        _ENGINES.clear()

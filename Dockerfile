@@ -7,14 +7,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /srv/nurtelora
 
 COPY requirements.txt ./requirements.txt
-RUN pip install --no-cache-dir --upgrade pip \
-    && pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
+COPY migrations ./migrations
+COPY alembic.ini ./alembic.ini
 
-RUN useradd --system --create-home --uid 10001 appuser \
-    && mkdir -p /data \
-    && chown appuser:appuser /data
+RUN useradd --system --create-home --uid 10001 appuser
 
 USER appuser
 EXPOSE 8000

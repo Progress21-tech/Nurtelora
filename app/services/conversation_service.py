@@ -1,4 +1,4 @@
-import json, uuid
+import json
 from app.config import get_settings
 from app.db.database import connection
 from app.services.appointment_service import appointment_reply
@@ -59,8 +59,8 @@ async def process_webhook(payload: dict) -> int:
                 if not mid or not sender: continue
                 typ=msg.get('type','unknown')
                 with connection() as c:
-                    try: c.execute("INSERT INTO processed_messages(message_id,message_type,processing_status) VALUES(?,?,'received')",(mid,typ))
-                    except Exception: continue
+                    inserted=c.execute("INSERT INTO processed_messages(message_id,message_type,processing_status) VALUES(?,?,'received') ON CONFLICT(message_id) DO NOTHING",(mid,typ))
+                    if inserted.rowcount == 0: continue
                 outbound_started=False
                 try:
                     text=msg.get('text',{}).get('body','') if typ=='text' else ''

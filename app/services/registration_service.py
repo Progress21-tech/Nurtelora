@@ -1,14 +1,14 @@
 import hashlib, hmac, uuid
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from app.config import get_settings
 from app.db.database import connection
 
 NOTICE_VERSION = "draft-1"
-_pending_consents: set[str] = set()
-_pending_deletions: set[str] = set()
+_WORKFLOW_STATE_TTL = timedelta(hours=24)
 PRIVACY_NOTICE = ("I can help with appointment information, participating clinics and clinician-reviewed maternal-health information. "
                   "I am not a doctor and cannot assess emergencies. To reply, your message and any voice note are processed by our messaging and authorised AI providers. "
-                  "If you consent, we will save a protected sender identifier, language, clinic choice and appointment details you choose to enter. We do not store raw audio by default. "
+                  "To match your YES or NO reply, a protected sender identifier and temporary consent state are stored for up to 24 hours, then removed. "
+                  "If you consent, we will also save your protected sender identifier, language, clinic choice and appointment details you choose to enter. We do not store raw audio by default. "
                   "Reply YES to consent or NO to continue without a saved profile. Reply STOP to stop.")
 
 def sender_digest(sender: str) -> str:
@@ -17,27 +17,57 @@ def sender_digest(sender: str) -> str:
 def get_user(sender: str):
     with connection() as c: return c.execute("SELECT * FROM users WHERE sender_hash=? AND deleted_at IS NULL", (sender_digest(sender),)).fetchone()
 
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+def _clear_expired(sender_hash: str, c) -> None:
+    now = _now().isoformat()
+    c.execute("UPDATE workflow_states SET pending_consent_expires_at=NULL WHERE sender_hash=? AND pending_consent_expires_at<=?", (sender_hash, now))
+    c.execute("UPDATE workflow_states SET pending_deletion_expires_at=NULL WHERE sender_hash=? AND pending_deletion_expires_at<=?", (sender_hash, now))
+    c.execute("DELETE FROM workflow_states WHERE sender_hash=? AND pending_consent_expires_at IS NULL AND pending_deletion_expires_at IS NULL", (sender_hash,))
+
+def cleanup_expired_workflow_states() -> None:
+    now=_now().isoformat()
+    with connection() as c:
+        c.execute("UPDATE workflow_states SET pending_consent_expires_at=NULL WHERE pending_consent_expires_at<=?",(now,))
+        c.execute("UPDATE workflow_states SET pending_deletion_expires_at=NULL WHERE pending_deletion_expires_at<=?",(now,))
+        c.execute("DELETE FROM workflow_states WHERE pending_consent_expires_at IS NULL AND pending_deletion_expires_at IS NULL")
+
 def start_registration(sender: str) -> str:
-    _pending_consents.add(sender_digest(sender))
+    digest = sender_digest(sender)
+    expiry = (_now() + _WORKFLOW_STATE_TTL).isoformat()
+    with connection() as c:
+        c.execute("""INSERT INTO workflow_states(sender_hash,pending_consent_expires_at,pending_deletion_expires_at)
+            VALUES(?,?,NULL) ON CONFLICT(sender_hash) DO UPDATE SET
+            pending_consent_expires_at=excluded.pending_consent_expires_at,
+            updated_at=CURRENT_TIMESTAMP""", (digest, expiry))
     return PRIVACY_NOTICE
 
 def has_pending_consent(sender: str) -> bool:
-    return sender_digest(sender) in _pending_consents
+    digest = sender_digest(sender)
+    with connection() as c:
+        _clear_expired(digest, c)
+        row = c.execute("SELECT pending_consent_expires_at FROM workflow_states WHERE sender_hash=?", (digest,)).fetchone()
+        return bool(row and row["pending_consent_expires_at"] and row["pending_consent_expires_at"] > _now().isoformat())
 
 def record_consent(sender: str, yes: bool) -> str:
     digest=sender_digest(sender)
-    if digest not in _pending_consents: return "Reply START to see the privacy notice first."
-    _pending_consents.discard(digest)
-    if not yes: return "Understood. No saved profile was created. You can use HELP or reply START later."
     with connection() as c:
+        _clear_expired(digest, c)
+        claimed=c.execute("UPDATE workflow_states SET pending_consent_expires_at=NULL,updated_at=CURRENT_TIMESTAMP WHERE sender_hash=? AND pending_consent_expires_at>?",(digest,_now().isoformat()))
+        if claimed.rowcount!=1: return "Reply START to see the privacy notice first."
+        if not yes:
+            c.execute("DELETE FROM workflow_states WHERE sender_hash=? AND pending_consent_expires_at IS NULL AND pending_deletion_expires_at IS NULL",(digest,))
+            return "Understood. No saved profile was created. You can use HELP or reply START later."
         user = c.execute("SELECT id FROM users WHERE sender_hash=? AND deleted_at IS NULL", (digest,)).fetchone()
         if not user:
             uid=str(uuid.uuid4())
             c.execute("INSERT INTO users(id,sender_hash,consent_status,registration_state) VALUES(?,?,'granted','language_pending')", (uid,digest))
         else:
             uid=user["id"]
-            c.execute("UPDATE users SET consent_status='granted',registration_state='language_pending',stopped=0,updated_at=CURRENT_TIMESTAMP WHERE id=?",(uid,))
+            c.execute("UPDATE users SET consent_status='granted',registration_state='language_pending',stopped=FALSE,updated_at=CURRENT_TIMESTAMP WHERE id=?",(uid,))
         c.execute("INSERT INTO consent_records(id,user_id,consent_type,status,notice_version) VALUES(?,?,?,?,?)", (str(uuid.uuid4()),uid,"persistent_profile","granted",NOTICE_VERSION))
+        c.execute("DELETE FROM workflow_states WHERE sender_hash=? AND pending_deletion_expires_at IS NULL", (digest,))
     languages=sorted(get_settings().configured_languages)
     if not languages:
         return "Thanks for consenting. No pilot language has been configured and tested yet, so I can't continue the conversation safely. Reply DELETE if you want your saved profile removed."
@@ -101,24 +131,32 @@ def start_appointment_entry(sender: str) -> str:
 def delete_user_data(sender: str, confirm: bool=False) -> str:
     digest=sender_digest(sender)
     if not confirm:
-        _pending_deletions.add(digest)
+        expiry=(_now()+_WORKFLOW_STATE_TTL).isoformat()
+        with connection() as c:
+            c.execute("""INSERT INTO workflow_states(sender_hash,pending_deletion_expires_at,pending_consent_expires_at)
+                VALUES(?,?,NULL) ON CONFLICT(sender_hash) DO UPDATE SET
+                pending_deletion_expires_at=excluded.pending_deletion_expires_at,updated_at=CURRENT_TIMESTAMP""",(digest,expiry))
         return "To delete your saved profile and appointments, reply DELETE CONFIRM. This cannot be undone."
-    if digest not in _pending_deletions: return "Reply DELETE first if you want to request deletion."
-    _pending_deletions.discard(digest)
     with connection() as c:
+        _clear_expired(digest,c)
+        claimed=c.execute("UPDATE workflow_states SET pending_deletion_expires_at=NULL,updated_at=CURRENT_TIMESTAMP WHERE sender_hash=? AND pending_deletion_expires_at>?",(digest,_now().isoformat()))
+        if claimed.rowcount!=1: return "Reply DELETE first if you want to request deletion."
         user=c.execute("SELECT id FROM users WHERE sender_hash=?",(digest,)).fetchone()
-        if not user: return "No saved profile was found for deletion."
+        if not user:
+            c.execute("DELETE FROM workflow_states WHERE sender_hash=?",(digest,))
+            return "No saved profile was found for deletion."
         uid=user['id']
         c.execute("DELETE FROM appointments WHERE user_id=?",(uid,))
         c.execute("DELETE FROM consent_records WHERE user_id=?",(uid,))
         c.execute("DELETE FROM interaction_events WHERE session_id=?",(uid,))
         c.execute("DELETE FROM users WHERE id=?",(uid,))
+        c.execute("DELETE FROM workflow_states WHERE sender_hash=?",(digest,))
     return "Your saved profile, consent record and appointments have been deleted."
 
 def stop_user(sender: str) -> str:
-    _pending_consents.discard(sender_digest(sender))
-    _pending_deletions.discard(sender_digest(sender))
+    digest=sender_digest(sender)
     with connection() as c:
-        u=c.execute("SELECT id FROM users WHERE sender_hash=?",(sender_digest(sender),)).fetchone()
-        if u: c.execute("UPDATE users SET stopped=1,reminder_opt_in=0,updated_at=CURRENT_TIMESTAMP WHERE id=?",(u["id"],))
+        c.execute("DELETE FROM workflow_states WHERE sender_hash=?",(digest,))
+        u=c.execute("SELECT id FROM users WHERE sender_hash=?",(digest,)).fetchone()
+        if u: c.execute("UPDATE users SET stopped=TRUE,reminder_opt_in=FALSE,updated_at=CURRENT_TIMESTAMP WHERE id=?",(u["id"],))
     return "You have been opted out. I will not send further reminders. Reply START if you want to begin again."

@@ -8,7 +8,7 @@ def next_appointment(sender: str):
         u=c.execute("SELECT id FROM users WHERE sender_hash=? AND deleted_at IS NULL AND consent_status='granted'",(sender_digest(sender),)).fetchone()
         if not u: return None
         today=datetime.now(ZoneInfo("Africa/Lagos")).date().isoformat()
-        return c.execute("SELECT a.*,f.name facility_name,f.phone facility_phone FROM appointments a LEFT JOIN facilities f ON f.id=a.facility_id WHERE a.user_id=? AND a.scheduled_at IS NOT NULL AND date(a.scheduled_at)>=? ORDER BY a.scheduled_at LIMIT 1",(u['id'],today)).fetchone()
+        return c.execute("SELECT a.*,f.name facility_name,f.phone facility_phone FROM appointments a LEFT JOIN facilities f ON f.id=a.facility_id WHERE a.user_id=? AND a.scheduled_at IS NOT NULL AND substr(a.scheduled_at,1,10)>=? ORDER BY a.scheduled_at LIMIT 1",(u['id'],today)).fetchone()
 
 def appointment_reply(sender: str) -> str:
     a=next_appointment(sender)

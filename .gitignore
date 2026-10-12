@@ -4,4 +4,6 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 nurtelora.db
+*.db
+*.sqlite
 *.sqlite3

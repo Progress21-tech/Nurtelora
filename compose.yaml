@@ -1,4 +1,33 @@
 services:
+  db:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-nurtelora}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-local-only-password}
+      POSTGRES_DB: ${POSTGRES_DB:-nurtelora}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+
+  migrate:
+    build: .
+    env_file:
+      - .env
+    environment:
+      APP_ENV: development
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-nurtelora}:${POSTGRES_PASSWORD:-local-only-password}@db:5432/${POSTGRES_DB:-nurtelora}
+    command: ["alembic", "upgrade", "head"]
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+
   nurtelora:
     build: .
     restart: unless-stopped
@@ -7,11 +36,12 @@ services:
     env_file:
       - .env
     environment:
-      APP_ENV: production
-      DATABASE_URL: sqlite:////data/nurtelora.db
+      APP_ENV: development
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-nurtelora}:${POSTGRES_PASSWORD:-local-only-password}@db:5432/${POSTGRES_DB:-nurtelora}
       PORT: ${PORT:-8000}
-    volumes:
-      - nurtelora_data:/data
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
 
 volumes:
-  nurtelora_data:
+  postgres_data:

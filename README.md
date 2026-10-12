@@ -1,65 +1,69 @@
 # Nurtelora
 
-Nurtelora is the working repository for a WhatsApp maternal-care navigator for Nigeria. The current implementation is an early technical prototype; it is not approved for clinical use.
+Nurtelora is an early technical prototype for a WhatsApp maternal-care navigator in Nigeria. It is not approved for clinical use. PostgreSQL is the intended deployment database; SQLAlchemy provides synchronous, transaction-scoped connections and Alembic owns all schema changes. SQLite remains an explicit local test/development option.
 
-## Current status
+The PRD informs onboarding, appointment provenance, safety and pilot scope. The research PDF has not been incorporated. No real credentials, clinic records, or clinician-reviewed answers are included. Do not connect real patients until qualified professionals and relevant institutions approve content, safety routes, privacy notices and data handling.
 
-The service is being built around FastAPI, SQLite, N-ATLAS hosted chat and ASR, and WhatsApp Cloud API. No real credentials, clinic records, or clinician-reviewed answers are included. No speech language is enabled by default; configure one only after the complete interaction path is tested with intended users and speakers. Safety-sensitive symptom handling is restricted to a generic escalation message. Do not connect real patients until qualified maternal-health professionals and the relevant institutions approve the content, safety routes, privacy notices, and data handling.
+## Database configuration
 
-The PRD has been read and informs the onboarding, appointment provenance, safety and pilot scope. The research PDF could not be extracted with the available tools; do not treat the report's findings as incorporated yet. No clinical content has been inferred from its filename.
+Set `DATABASE_URL` to a SQLAlchemy PostgreSQL URL. The app supports `postgresql://`, `postgresql+psycopg://` and Render-style `postgres://` URLs; the latter two legacy forms are normalized to Psycopg 3 without dropping URL query options. Production (`APP_ENV=production`) rejects SQLite and requires a PostgreSQL URL. Credentials must be provided through the deployment secret/environment settings, never source control.
 
-## Run locally
+`PHONE_HASH_SECRET` must be a unique secret of at least 32 characters in production. Integration settings are optional while their integrations remain disabled. N-ATLAS uses `NATLAS_ENABLED`, `NATLAS_BASE_URL`, `NATLAS_API_KEY`, `NATLAS_MODEL`, `NATLAS_TIMEOUT_SECONDS`, `NATLAS_MAX_RETRIES`, and `NATLAS_LANGUAGES`. WhatsApp uses `WHATSAPP_ENABLED`, `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_VERIFY_TOKEN`, `WHATSAPP_APP_SECRET`, `META_GRAPH_API_VERSION`, and `WHATSAPP_WEBHOOK_PATH`. Never put production secrets in `.env.example` or CI.
 
-Requires Python 3.10+.
+## Local development with Docker Compose
+
+Requires Docker Compose v2. Copy `.env.example` to `.env`; its database credentials are synthetic local-only examples. If you change the local PostgreSQL password, use URL-safe characters because Compose assembles `DATABASE_URL` from the three `POSTGRES_*` settings. Start the database, apply migrations as a separate one-off service, then start FastAPI:
 
 ```powershell
-py -3.11 -m venv .venv
-.venv\Scripts\Activate.ps1
-python -m pip install -r requirements.txt
 Copy-Item .env.example .env
-python -m app.db.database
-uvicorn app.main:app --reload
+docker compose up --build -d
+docker compose logs -f nurtelora
 ```
 
-Health check: `GET http://127.0.0.1:8000/health`. The app starts with integrations disabled. Add authorised credentials to `.env` to enable real calls. `NATLAS_BASE_URL` must be supplied by an authorised provider; no endpoint or key is assumed. Keep `.env` private.
+Compose waits for PostgreSQL health and successful completion of `alembic upgrade head` before starting the app. The database is kept in the `postgres_data` named volume. To inspect service status, use `docker compose ps`; the health endpoint is `http://localhost:8000/health` and reports the connected backend without exposing credentials.
 
-## Configuration
+For direct Python development, use Python 3.10 or newer, install `requirements-dev.txt`, set `DATABASE_URL` to an explicit local URL such as `sqlite:///./nurtelora.db`, and run `alembic upgrade head` before `uvicorn app.main:app --reload`. Database tables are not created by importing the app or starting Uvicorn. Do not use the local SQLite file in production.
 
-See `.env.example`. Configure `WHATSAPP_VERIFY_TOKEN` and `WHATSAPP_APP_SECRET` from Meta. `META_GRAPH_API_VERSION` is required before enabling WhatsApp. Set the webhook URL to `/webhooks/whatsapp` on a stable HTTPS host. Do not enable WhatsApp message handling without consent text and the approved safety fallback.
+## Schema migrations
 
-N-ATLAS uses the documented hosted gateway endpoints `/v1/chat/completions` and `/v1/audio/transcriptions`. The configured `NATLAS_BASE_URL` may end in `/v1` or be an origin. Chat explicitly instructs the model about language; the gateway's chat `language` field is logging metadata only. Voice ASR requires an explicitly configured supported language.
+The versioned PostgreSQL baseline is in `migrations/versions/`. From an environment that has access to the target database, run:
 
-## Container deployment
+```powershell
+alembic upgrade head
+```
 
-The repository includes a Docker image and Compose setup so the service can be built on a deployment host without installing Python on your Windows machine. Install Docker Engine/Desktop on the deployment host, copy `.env.example` to `.env`, and set secrets there. Generate a fresh hash key from PowerShell with `$rng = [System.Security.Cryptography.RandomNumberGenerator]::Create(); $bytes = New-Object byte[] 32; $rng.GetBytes($bytes); [BitConverter]::ToString($bytes).Replace('-', '').ToLowerInvariant()`; set the result as `PHONE_HASH_SECRET`. Keep `NATLAS_ENABLED=false` and `WHATSAPP_ENABLED=false` until their authorized settings are complete. The compose configuration stores SQLite at `/data/nurtelora.db` in a persistent named volume and runs one worker because onboarding state is in process memory.
+Run this once for each release before that application version receives traffic. Render currently documents pre-deploy commands for paid web services, private services and background workers; confirm support for the selected service plan in the [Render deploy documentation](https://render.com/docs/deploys). If a pre-deploy command is unavailable, run the same Alembic command as an authorized one-off operation against the Render internal database URL before switching traffic. Do not add migrations to application startup; that would make every worker race to alter production schema.
 
-Build and start with `docker compose up --build -d`; inspect startup with `docker compose logs -f nurtelora`, then check `http://localhost:8000/health`. For a cloud container host, build from this Dockerfile, set the same environment variables in its secret manager, expose its assigned port through `PORT`, and attach persistent storage at `/data`. Do not deploy this SQLite prototype across multiple replicas or workers. The health route confirms process availability only; it does not verify upstream credentials, webhook delivery, content approval, or WhatsApp behavior.
+## SQLite files and existing data
 
-## Data and safety
+The repository contains no SQLite database file or included dataset. SQLite files are ignored by Git and are not automatically imported. A fresh PostgreSQL database should be initialized with Alembic. If an operator has a separate local SQLite file containing records, stop before deploying those records and plan a separately reviewed, explicit data migration with count and relationship validation; this repository does not currently include an import utility.
 
-The SQLite database is initialized on application startup. User profiles use a keyed HMAC digest of sender numbers for lookup; production startup requires a unique `PHONE_HASH_SECRET` of at least 32 characters. Consent-pending and deletion-confirmation tokens are held in process memory, so use a single worker for this prototype. There is no real-patient seed data. The approved FAQ and facility directory are empty until vetted, sourced records are added. Suggested dates are never created by the model. Symptom routing is conservative and disabled for clinical triage; only a generic message directs the user to contact a qualified provider or local emergency service. `DELETE` followed by `DELETE CONFIRM` removes the user's application records; any live deployment needs an approved retention and backup-erasure policy.
+## Tests and CI
 
-### Loading reviewed pilot content
+Install `requirements-dev.txt` and run `python -m pytest`. Local tests use a fresh temporary SQLite database and apply the migration history for isolation. CI sets `NURTELORA_TEST_DATABASE_URL` to a disposable PostgreSQL service and runs `alembic upgrade head` before the tests, so those tests exercise PostgreSQL without mocking the database layer. Tests use synthetic data and mock the WhatsApp sender; no test calls live N-ATLAS or WhatsApp services.
 
-On startup, `app/content/approved_faq.json` and `app/content/facilities.json` are validated and upserted into SQLite. Keep their current `schema_version: 1` documents empty until qualified reviewers approve entries. Each FAQ entry needs `id`, `topic`, `intent`, `language`, `approved_text`, `source_title`, `source_url` (HTTPS), `reviewed_at`, `review_due_at`, `reviewer_role`, `version`, and `review_status` set to `approved`. Use ISO dates and only include content reviewed for the selected pilot language. Expired review dates are excluded from retrieval.
+GitHub Actions also runs `python -m compileall app tests migrations` and builds the Dockerfile without publishing the image. Integrations are disabled in CI.
 
-Each facility record needs `id`, `name`, `address`, `state`, `lga`, `services` (array), `opening_hours`, `phone`, `source`, `last_verified_at` (ISO date or datetime), `owner`, and `verification_status` set to `verified`. Coordinates are optional but must be provided together. Only add facilities whose contact and service details have been checked with the participating facility. Redeploy after editing these files.
+## Render preparation
 
-SQLite is suitable for local development only. Use a reviewed migration plan for PostgreSQL, TLS, access controls, backups, retention/deletion, and Nigerian data protection obligations before handling real health data.
+Create a managed PostgreSQL database and configure `DATABASE_URL` in the Render service from the database's **internal connection URL** when both resources share a region. Render documents the same-region internal URL as the private-network option; see [Render PostgreSQL connection docs](https://render.com/docs/postgresql-creating-connecting). Also set `APP_ENV=production` and a generated `PHONE_HASH_SECRET`. Add N-ATLAS and Meta values only when authorized and ready to enable those integrations. Do not place credentials in `render.yaml`, this repository, or logs.
 
-## Tests
+Use `alembic upgrade head` as the separate pre-deploy migration command when available, and use this start command for the web service:
 
-For a development environment, install `requirements-dev.txt`, then run `python -m pytest`. Tests are designed to use mocked upstream clients. Live smoke tests are not implemented. No test or live integration result is claimed from this environment because Python could not be launched here.
+```text
+uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 1
+```
 
-## Architecture and current limitations
+The Dockerfile uses the same single-worker command and honors `PORT`. If the selected service plan does not offer a pre-deploy command, execute Alembic once from a secure one-off operation before directing traffic to the new version. Do not run migrations in each worker. After deployment, `/health` should report `database.backend` as `postgresql`; it checks connectivity and schema presence but does not verify upstream credentials or clinical approval.
 
-- `app/api/whatsapp_webhook.py` verifies Meta challenges/signatures and parses inbound messages.
-- `app/services/` contains the N-ATLAS, WhatsApp, deterministic conversation, knowledge, facility, appointment, registration, and safety boundaries.
-- `app/db/` persists minimal profiles, consent, appointments, facilities, approved knowledge entries, and message idempotency records.
-- Scheduled reminders, clinical booking, automatic obstetric triage, enabled languages, non-English approved content, and live facility data are not available by default.
-- The facility records are empty pending a named pilot partner and verified directory data. The PRD also calls for transcript confirmation when ASR confidence is low; this gateway response does not currently expose a confidence score, so no confidence-based confirmation is claimed.
-- The knowledge base, safety message catalog, and facility directory require review and verified data before use.
+## Application data and safety
 
-## External requirements before a demonstration with real users
+The database stores HMAC-digested sender identifiers, consent records, user-selected language/facility, user-entered appointment dates, reviewed FAQ content, verified facility content, webhook idempotency records and expiring consent/deletion workflow state. The pending consent and deletion confirmations expire after 24 hours and are stored under the sender digest, not the raw number. Deletion runs in a transaction. `STOP` clears pending workflow state and disables reminders.
 
-Authorised N-ATLAS gateway URL/key; Meta app credentials and a configured WhatsApp number; a stable HTTPS deployment; qualified clinical review of all user-facing health and safety content; approved participating-facility data; user-tested languages; privacy/data-protection review and institutional approval; and a deployment authentication and operations plan.
+The FAQ and facility JSON files are empty until qualified reviewers approve sourced content. Content is validated and loaded at startup after migrations. Facility records are only as verified as the approved source data supplied by the operator. Appointment dates entered by users are not clinic bookings. Safety routing is a generic, English keyword guard, not clinical triage. No speech language is enabled by default; low-confidence transcript confirmation is unavailable from the current gateway response.
+
+The health route reports database connectivity and dialect without including the connection URL. PostgreSQL migration alone does not make the service ready for real health data. Access controls, backup/retention and deletion procedures, privacy review, clinical review, language testing, facility verification, operations monitoring and institutional approvals remain necessary.
+
+## Content files
+
+`app/content/approved_faq.json` and `app/content/facilities.json` are validated and upserted on app startup. Keep them empty until entries have been reviewed. FAQ entries require source URL, reviewer role, version, review dates and `review_status: "approved"`. Facility entries require source, verification owner, timestamp and `verification_status: "verified"`. See the Pydantic models in `app/db/content_loader.py` for the full schema.

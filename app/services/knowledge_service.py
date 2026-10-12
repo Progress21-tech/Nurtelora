@@ -17,7 +17,7 @@ def retrieve_approved(text: str, language: str):
     terms={w.lower() for w in text.split() if len(w)>3}
     if not terms: return []
     with connection() as c:
-        rows=c.execute("SELECT * FROM knowledge_entries WHERE review_status='approved' AND language=? AND review_due_at>=date('now')",(language,)).fetchall()
+        rows=c.execute("SELECT * FROM knowledge_entries WHERE review_status='approved' AND language=? AND review_due_at>=CAST(CURRENT_DATE AS TEXT)",(language,)).fetchall()
     return [r for r in rows if terms & {w.lower() for w in (r['topic']+' '+r['intent']).split()}]
 
 async def answer_question(text: str, language: str, natlas):

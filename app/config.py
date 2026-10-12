@@ -5,7 +5,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
     app_env: str = "development"
-    database_url: str = "sqlite:///./nurtelora.db"
+    # Operators must explicitly select SQLite for local use or PostgreSQL for deployment.
+    database_url: str = ""
     phone_hash_secret: str = "development-only-change-me"
     natlas_base_url: str = ""
     natlas_api_key: str = ""
