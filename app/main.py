@@ -9,7 +9,8 @@ from app.db.content_loader import load_approved_content
 async def lifespan(app: FastAPI):
     from app.config import get_settings
     settings=get_settings()
-    if settings.app_env.casefold()=="production" and (settings.phone_hash_secret=="development-only-change-me" or len(settings.phone_hash_secret)<32):
+    secret=settings.phone_hash_secret.casefold()
+    if settings.app_env.casefold()=="production" and (len(settings.phone_hash_secret)<32 or "replace" in secret or "change-me" in secret):
         raise RuntimeError("Production requires a unique PHONE_HASH_SECRET of at least 32 characters.")
     init_db()
     load_approved_content()

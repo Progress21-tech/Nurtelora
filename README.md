@@ -29,6 +29,12 @@ See `.env.example`. Configure `WHATSAPP_VERIFY_TOKEN` and `WHATSAPP_APP_SECRET` 
 
 N-ATLAS uses the documented hosted gateway endpoints `/v1/chat/completions` and `/v1/audio/transcriptions`. The configured `NATLAS_BASE_URL` may end in `/v1` or be an origin. Chat explicitly instructs the model about language; the gateway's chat `language` field is logging metadata only. Voice ASR requires an explicitly configured supported language.
 
+## Container deployment
+
+The repository includes a Docker image and Compose setup so the service can be built on a deployment host without installing Python on your Windows machine. Install Docker Engine/Desktop on the deployment host, copy `.env.example` to `.env`, and set secrets there. Generate a fresh hash key from PowerShell with `$rng = [System.Security.Cryptography.RandomNumberGenerator]::Create(); $bytes = New-Object byte[] 32; $rng.GetBytes($bytes); [BitConverter]::ToString($bytes).Replace('-', '').ToLowerInvariant()`; set the result as `PHONE_HASH_SECRET`. Keep `NATLAS_ENABLED=false` and `WHATSAPP_ENABLED=false` until their authorized settings are complete. The compose configuration stores SQLite at `/data/nurtelora.db` in a persistent named volume and runs one worker because onboarding state is in process memory.
+
+Build and start with `docker compose up --build -d`; inspect startup with `docker compose logs -f nurtelora`, then check `http://localhost:8000/health`. For a cloud container host, build from this Dockerfile, set the same environment variables in its secret manager, expose its assigned port through `PORT`, and attach persistent storage at `/data`. Do not deploy this SQLite prototype across multiple replicas or workers. The health route confirms process availability only; it does not verify upstream credentials, webhook delivery, content approval, or WhatsApp behavior.
+
 ## Data and safety
 
 The SQLite database is initialized on application startup. User profiles use a keyed HMAC digest of sender numbers for lookup; production startup requires a unique `PHONE_HASH_SECRET` of at least 32 characters. Consent-pending and deletion-confirmation tokens are held in process memory, so use a single worker for this prototype. There is no real-patient seed data. The approved FAQ and facility directory are empty until vetted, sourced records are added. Suggested dates are never created by the model. Symptom routing is conservative and disabled for clinical triage; only a generic message directs the user to contact a qualified provider or local emergency service. `DELETE` followed by `DELETE CONFIRM` removes the user's application records; any live deployment needs an approved retention and backup-erasure policy.
@@ -43,7 +49,7 @@ SQLite is suitable for local development only. Use a reviewed migration plan for
 
 ## Tests
 
-Install dependencies, then run `python -m pytest`. Tests are designed to use mocked upstream clients. Live smoke tests are not implemented. No test or live integration result is claimed from this environment because Python could not be launched here.
+For a development environment, install `requirements-dev.txt`, then run `python -m pytest`. Tests are designed to use mocked upstream clients. Live smoke tests are not implemented. No test or live integration result is claimed from this environment because Python could not be launched here.
 
 ## Architecture and current limitations
 

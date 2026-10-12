@@ -1,0 +1,17 @@
+services:
+  nurtelora:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "${PORT:-8000}:${PORT:-8000}"
+    env_file:
+      - .env
+    environment:
+      APP_ENV: production
+      DATABASE_URL: sqlite:////data/nurtelora.db
+      PORT: ${PORT:-8000}
+    volumes:
+      - nurtelora_data:/data
+
+volumes:
+  nurtelora_data:
