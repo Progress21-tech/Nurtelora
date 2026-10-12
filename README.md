@@ -31,9 +31,15 @@ N-ATLAS uses the documented hosted gateway endpoints `/v1/chat/completions` and 
 
 ## Data and safety
 
-The SQLite database is initialized on application startup. User profiles use a keyed HMAC digest of sender numbers for lookup; a stable `PHONE_HASH_SECRET` must be set before deployment. Consent-pending and deletion-confirmation tokens are held in process memory, so use a single worker for this prototype. There is no real-patient seed data. The approved FAQ and facility directory are empty until vetted, sourced records are added. Suggested dates are never created by the model. Symptom routing is conservative and disabled for clinical triage; only a generic message directs the user to contact a qualified provider or local emergency service.
+The SQLite database is initialized on application startup. User profiles use a keyed HMAC digest of sender numbers for lookup; production startup requires a unique `PHONE_HASH_SECRET` of at least 32 characters. Consent-pending and deletion-confirmation tokens are held in process memory, so use a single worker for this prototype. There is no real-patient seed data. The approved FAQ and facility directory are empty until vetted, sourced records are added. Suggested dates are never created by the model. Symptom routing is conservative and disabled for clinical triage; only a generic message directs the user to contact a qualified provider or local emergency service. `DELETE` followed by `DELETE CONFIRM` removes the user's application records; any live deployment needs an approved retention and backup-erasure policy.
 
-SQLite is suitable for local development only. Use a reviewed migration plan for PostgreSQL, TLS, access controls, backups, retention/deletion, and Nigerian data protection obligations before handling real health data. A user deletion workflow is not implemented yet; provide authenticated deletion before any real deployment.
+### Loading reviewed pilot content
+
+On startup, `app/content/approved_faq.json` and `app/content/facilities.json` are validated and upserted into SQLite. Keep their current `schema_version: 1` documents empty until qualified reviewers approve entries. Each FAQ entry needs `id`, `topic`, `intent`, `language`, `approved_text`, `source_title`, `source_url` (HTTPS), `reviewed_at`, `review_due_at`, `reviewer_role`, `version`, and `review_status` set to `approved`. Use ISO dates and only include content reviewed for the selected pilot language. Expired review dates are excluded from retrieval.
+
+Each facility record needs `id`, `name`, `address`, `state`, `lga`, `services` (array), `opening_hours`, `phone`, `source`, `last_verified_at` (ISO date or datetime), `owner`, and `verification_status` set to `verified`. Coordinates are optional but must be provided together. Only add facilities whose contact and service details have been checked with the participating facility. Redeploy after editing these files.
+
+SQLite is suitable for local development only. Use a reviewed migration plan for PostgreSQL, TLS, access controls, backups, retention/deletion, and Nigerian data protection obligations before handling real health data.
 
 ## Tests
 

@@ -1,4 +1,4 @@
-import math
+import json, math
 from app.db.database import connection
 
 def haversine_km(lat1,lon1,lat2,lon2):
@@ -18,4 +18,10 @@ def search_facilities(area: str|None=None, latitude: float|None=None, longitude:
 
 def format_facilities(rows):
     if not rows: return "I don't have verified participating facilities for that area yet. Please contact your local health authority or antenatal provider for a current referral."
-    return "Verified facilities:\n"+"\n".join(f"{r['name']} — {r['address']}; phone: {r['phone'] or 'not listed'}; last verified: {r['last_verified_at'] or 'date not recorded'}; source: {r['source']}. Please call to confirm current availability." for r in rows)
+    lines=[]
+    for r in rows:
+        services=json.loads(r['services'] or '[]')
+        listed=f"; listed services: {', '.join(services)}" if services else ""
+        hours=f"; hours: {r['opening_hours']}" if r['opening_hours'] else ""
+        lines.append(f"{r['name']} — {r['address']}; phone: {r['phone'] or 'not listed'}{listed}{hours}; last verified: {r['last_verified_at'] or 'date not recorded'}; source: {r['source']}. Call to confirm current availability.")
+    return "Verified facilities:\n"+"\n".join(lines)

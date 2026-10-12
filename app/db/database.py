@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS appointments (
 CREATE TABLE IF NOT EXISTS knowledge_entries (
  id TEXT PRIMARY KEY, topic TEXT NOT NULL, intent TEXT NOT NULL, language TEXT NOT NULL, approved_text TEXT NOT NULL,
  source_title TEXT NOT NULL, source_url TEXT NOT NULL, reviewed_at TEXT, reviewer_role TEXT,
- version TEXT NOT NULL, review_status TEXT NOT NULL DEFAULT 'pending'
+ version TEXT NOT NULL, review_due_at TEXT, review_status TEXT NOT NULL DEFAULT 'pending'
 );
 CREATE TABLE IF NOT EXISTS processed_messages (
  message_id TEXT PRIMARY KEY, user_id TEXT REFERENCES users(id), message_type TEXT NOT NULL,
@@ -74,6 +74,9 @@ def init_db() -> None:
         columns={row[1] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
         if "pending_appointment_at" not in columns:
             conn.execute("ALTER TABLE users ADD COLUMN pending_appointment_at TEXT")
+        knowledge_columns={row[1] for row in conn.execute("PRAGMA table_info(knowledge_entries)").fetchall()}
+        if "review_due_at" not in knowledge_columns:
+            conn.execute("ALTER TABLE knowledge_entries ADD COLUMN review_due_at TEXT")
 
 if __name__ == "__main__":
     init_db()

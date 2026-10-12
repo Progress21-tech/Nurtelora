@@ -61,6 +61,7 @@ async def process_webhook(payload: dict) -> int:
                 with connection() as c:
                     try: c.execute("INSERT INTO processed_messages(message_id,message_type,processing_status) VALUES(?,?,'received')",(mid,typ))
                     except Exception: continue
+                outbound_started=False
                 try:
                     text=msg.get('text',{}).get('body','') if typ=='text' else ''
                     if typ=='location':
@@ -83,10 +84,20 @@ async def process_webhook(payload: dict) -> int:
                     elif typ=='text': reply=await process_text(sender,mid,text)
                     else: reply="I can read text, voice notes and shared locations. Please try one of those."
                     from app.services.whatsapp_service import WhatsAppService
+                    outbound_started=True
                     out=await WhatsAppService().send_text_message(sender,reply,mid)
                     with connection() as c: c.execute("UPDATE processed_messages SET processing_status='sent',outbound_message_id=? WHERE message_id=?",(out,mid))
                 except Exception as exc:
                     category=type(exc).__name__[:64]
                     with connection() as c: c.execute("UPDATE processed_messages SET processing_status='failed',error_category=? WHERE message_id=?",(category,mid))
+                    # A provider timeout can leave delivery ambiguous; avoid a duplicate reply.
+                    if not outbound_started:
+                        try:
+                            from app.services.whatsapp_service import WhatsAppService
+                            fallback="I couldn't process that message right now. Please try again as text or contact your antenatal clinic. If you believe this is an emergency, seek urgent care now."
+                            out=await WhatsAppService().send_text_message(sender,fallback,mid)
+                            with connection() as c: c.execute("UPDATE processed_messages SET outbound_message_id=? WHERE message_id=?",(out,mid))
+                        except Exception:
+                            pass
                 processed+=1
     return processed
