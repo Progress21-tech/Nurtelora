@@ -10,6 +10,7 @@ from app.services.natlas_service import IntegrationNotConfigured
 from app.services.conversation_service import process_text
 from app.services.registration_service import get_user
 from app.services.knowledge_service import answer_is_supported
+from app.services.whatsapp_service import _is_allowed_media_url
 
 @pytest.fixture(autouse=True)
 def setup_db(tmp_path, monkeypatch):
@@ -54,6 +55,13 @@ def test_grounding_guard_rejects_new_advice_and_numbers():
 def test_unconfigured_natlas_fails_explicitly():
     service=__import__('app.services.natlas_service',fromlist=['NAtlasService']).NAtlasService(Settings())
     with pytest.raises(IntegrationNotConfigured): service._base()
+
+def test_media_download_url_must_use_an_approved_meta_host():
+    assert _is_allowed_media_url('https://lookaside.fbsbx.com/whatsapp/attachment')
+    assert _is_allowed_media_url('https://scontent.example.fbcdn.net/media')
+    assert not _is_allowed_media_url('https://lookaside.fbsbx.com.attacker.test/media')
+    assert not _is_allowed_media_url('http://lookaside.fbsbx.com/media')
+    assert not _is_allowed_media_url('https://user@lookaside.fbsbx.com/media')
 
 def test_valid_signature_is_accepted_without_messages(monkeypatch):
     secret='app-secret'; body=json.dumps({'object':'whatsapp_business_account','entry':[]}).encode()

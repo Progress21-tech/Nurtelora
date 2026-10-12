@@ -1,4 +1,5 @@
 import httpx
+from urllib.parse import urlsplit
 from app.config import Settings, get_settings
 from app.services.natlas_service import IntegrationNotConfigured, UpstreamFailure
 
@@ -43,6 +44,8 @@ class WhatsAppService:
         meta = await self._request("GET", self._url(media_id))
         try: media_url, mime = meta.json()["url"], meta.json().get("mime_type", "")
         except (ValueError, KeyError, TypeError): raise UpstreamFailure("Unexpected media metadata") from None
+        if not _is_allowed_media_url(media_url):
+            raise UpstreamFailure("Unexpected media host")
         extensions={"audio/ogg":"ogg","audio/opus":"opus","audio/mpeg":"mp3","audio/mp3":"mp3","audio/mp4":"m4a","audio/x-m4a":"m4a","audio/wav":"wav","audio/x-wav":"wav","audio/flac":"flac"}
         suffix=extensions.get(mime.split(';',1)[0].lower())
         if not suffix: raise ValueError("Unsupported media type")
@@ -50,3 +53,16 @@ class WhatsAppService:
         if r.headers.get("content-length") and int(r.headers["content-length"])>max_bytes: raise ValueError("Audio exceeds configured size limit")
         if len(r.content) > max_bytes: raise ValueError("Audio exceeds configured size limit")
         return r.content, mime, media_id + "." + suffix
+
+
+def _is_allowed_media_url(url: str) -> bool:
+    """Only send the WhatsApp bearer token to HTTPS media hosts owned by Meta."""
+    try:
+        parsed = urlsplit(url)
+        port = parsed.port
+    except (TypeError, ValueError):
+        return False
+    host = (parsed.hostname or "").casefold()
+    allowed_host = (host == "graph.facebook.com" or host.endswith(".fbcdn.net") or host.endswith(".fbsbx.com"))
+    return (parsed.scheme == "https" and allowed_host and port in (None, 443)
+            and parsed.username is None and parsed.password is None)
